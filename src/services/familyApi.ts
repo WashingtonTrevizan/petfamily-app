@@ -227,7 +227,7 @@ export async function createFamily(user: User, familyName: string) {
 }
 
 export async function joinFamily(user: User, inviteCode: string) {
-  const formatted = inviteCode.trim().toUpperCase();
+  const formatted = inviteCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 
   if (formatted.length < 6) {
     throw new Error('Codigo invalido.');
@@ -405,6 +405,7 @@ export async function loadFamilyBundle(familyId: string): Promise<FamilyBundle> 
       time: formatTime(date),
       day: isToday(date) ? 'today' : 'tomorrow',
       assignedTo: assignedMember?.name,
+      petId: task.pet_id || undefined,
       petName: petById.get(task.pet_id)?.name || 'Pet',
       completed: Boolean(task.completed),
     };

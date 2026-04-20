@@ -47,6 +47,7 @@ export interface Task {
   time: string;
   day: 'today' | 'tomorrow';
   assignedTo?: string;
+  petId?: string;
   petName: string;
   completed: boolean;
 }

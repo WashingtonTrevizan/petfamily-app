@@ -526,11 +526,21 @@ export default function App() {
         });
 
         if (uploadError) {
-          throw uploadError;
+          if (uploadError.message.toLowerCase().includes('bucket not found')) {
+            // Fallback to data URL when Storage bucket is not provisioned yet.
+            finalAvatarUrl = await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(String(reader.result));
+              reader.onerror = () => reject(new Error('Nao foi possivel ler a imagem selecionada.'));
+              reader.readAsDataURL(avatarFile);
+            });
+          } else {
+            throw uploadError;
+          }
+        } else {
+          const { data } = supabase.storage.from('pet-images').getPublicUrl(filePath);
+          finalAvatarUrl = data.publicUrl;
         }
-
-        const { data } = supabase.storage.from('pet-images').getPublicUrl(filePath);
-        finalAvatarUrl = data.publicUrl;
       }
 
       const { error: profileError } = await supabase
@@ -703,7 +713,7 @@ export default function App() {
             loading={loadingAction}
             initialName={currentMember?.name || user?.user_metadata?.full_name || user?.email?.split('@')[0] || ''}
             initialAvatar={currentMember?.avatar || 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=200'}
-            onBack={() => setCurrentScreen('family-profile')}
+            onBack={() => setCurrentScreen('ranking')}
             onSave={handleUpdateProfile}
           />
         );
@@ -910,8 +920,6 @@ function FamilySelectScreen(props: FamilySelectScreenProps) {
 }
 
 function CreateFamilyScreen(props: CreateFamilyScreenProps) {
-  const previewCode = useMemo(() => Math.random().toString(36).slice(2, 8).toUpperCase(), []);
-
   return (
     <div className="h-full flex flex-col overflow-y-auto custom-scrollbar">
       <header className="p-4 flex items-center justify-between">
@@ -941,9 +949,8 @@ function CreateFamilyScreen(props: CreateFamilyScreenProps) {
             <span className="text-xs font-bold uppercase tracking-widest text-slate-500">Codigo de Convite</span>
             <Settings size={16} className="text-primary" />
           </div>
-          <div className="flex items-center justify-between bg-black/20 rounded-lg p-4 border border-white/5">
-            <span className="text-2xl font-mono font-bold text-primary tracking-widest">{previewCode}</span>
-            <Copy size={20} className="text-primary" />
+          <div className="bg-black/20 rounded-lg p-4 border border-white/5">
+            <p className="text-sm text-slate-300">O codigo real sera gerado automaticamente apos criar a familia.</p>
           </div>
         </div>
       </div>
@@ -978,7 +985,7 @@ function JoinFamilyScreen(props: JoinFamilyScreenProps) {
 
         <input
           value={props.code}
-          onChange={(event) => props.onCodeChange(event.target.value.toUpperCase())}
+          onChange={(event) => props.onCodeChange(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
           maxLength={8}
           placeholder="EX: ABC123"
           className="w-full h-14 text-center text-2xl font-bold bg-white/5 border-2 border-white/10 rounded-xl focus:border-primary focus:ring-1 focus:ring-primary outline-none uppercase tracking-[0.35rem]"
@@ -1511,6 +1518,7 @@ function EditPetScreen(props: EditPetScreenProps) {
 
 function TasksScreen(props: TasksScreenProps) {
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
+  const [selectedPetByTask, setSelectedPetByTask] = useState<Record<string, string>>({});
 
   const firstPet = props.pets[0] || null;
 
@@ -1540,9 +1548,12 @@ function TasksScreen(props: TasksScreenProps) {
   };
 
   const onComplete = async (taskId: string) => {
+    const task = props.tasks.find((item) => item.id === taskId);
+    const selectedPetId = selectedPetByTask[taskId] || task?.petId || firstPet?.id;
+
     setBusyTaskId(taskId);
     try {
-      await completeTask(taskId, props.currentUser.id, props.family.id, firstPet?.id);
+      await completeTask(taskId, props.currentUser.id, props.family.id, selectedPetId);
       await props.onRefresh();
       toast.success('Tarefa concluida! +20 pts');
     } catch (error) {
@@ -1592,6 +1603,27 @@ function TasksScreen(props: TasksScreenProps) {
                   <span className="text-[10px] text-slate-500 font-medium">
                     {task.assignedTo ? `Atribuido a: ${task.assignedTo}` : 'Nao atribuido'}
                   </span>
+                  {props.pets.length > 0 && (
+                    <div className="mt-2">
+                      <label className="text-[10px] text-slate-400 mr-2">Pet da tarefa:</label>
+                      <select
+                        value={selectedPetByTask[task.id] || task.petId || props.pets[0].id}
+                        onChange={(event) =>
+                          setSelectedPetByTask((prev) => ({
+                            ...prev,
+                            [task.id]: event.target.value,
+                          }))
+                        }
+                        className="h-7 bg-white/5 border border-white/10 rounded-md px-2 text-[10px] focus:ring-1 focus:ring-primary outline-none"
+                      >
+                        {props.pets.map((pet) => (
+                          <option key={pet.id} value={pet.id}>
+                            {pet.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                 </div>
 
                 {task.assignedTo ? (
@@ -1625,6 +1657,15 @@ function TasksScreen(props: TasksScreenProps) {
 function FamilyProfileScreen(props: FamilyProfileScreenProps) {
   const completedCount = props.tasks.filter((task) => task.completed).length;
 
+  const copyInviteCode = async () => {
+    try {
+      await navigator.clipboard.writeText(props.family.inviteCode);
+      toast.success('Codigo copiado com sucesso.');
+    } catch {
+      toast.error('Nao foi possivel copiar o codigo.');
+    }
+  };
+
   return (
     <div className="h-full flex flex-col overflow-hidden">
       <header className="p-4 flex items-center justify-between border-b border-white/5">
@@ -1639,7 +1680,9 @@ function FamilyProfileScreen(props: FamilyProfileScreenProps) {
             <h1 className="text-2xl font-bold">{props.family.name}</h1>
             <div className="flex items-center gap-2 bg-primary/10 px-3 py-1 rounded-full mx-auto w-fit">
               <span className="text-primary text-sm font-bold tracking-widest">{props.family.inviteCode}</span>
-              <Copy size={14} className="text-primary cursor-pointer" />
+              <button onClick={copyInviteCode} className="text-primary" aria-label="Copiar codigo de convite">
+                <Copy size={14} className="cursor-pointer" />
+              </button>
             </div>
             <p className="text-slate-500 text-xs">Compartilhe o codigo para convidar novos membros.</p>
           </div>
