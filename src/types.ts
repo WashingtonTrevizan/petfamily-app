@@ -13,6 +13,7 @@ export type Screen =
   | 'create-family' 
   | 'join-family' 
   | 'ranking' 
+  | 'notifications'
   | 'pets' 
   | 'tasks' 
   | 'family-profile' 

@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Bath,
   Bell,
+  Camera,
   Calendar,
   Check,
   ChevronRight,
@@ -125,8 +126,23 @@ interface FamilyProfileScreenProps {
   family: FamilyInfo;
   members: FamilyMember[];
   tasks: Task[];
+  currentUserName: string;
+  currentUserAvatar: string;
   onLogout: () => Promise<void>;
   onNavigate: (screen: Screen) => void;
+}
+
+interface NotificationsScreenProps {
+  activities: Activity[];
+  onNavigate: (screen: Screen) => void;
+}
+
+interface EditProfileScreenProps {
+  loading: boolean;
+  initialName: string;
+  initialAvatar: string;
+  onBack: () => void;
+  onSave: (name: string, avatarFile: File | null, avatarUrl: string) => Promise<void>;
 }
 
 const EMPTY_ACTIVITIES: Activity[] = [];
@@ -236,6 +252,11 @@ export default function App() {
   const sortedMembers = useMemo(
     () => [...members].sort((a, b) => b.points - a.points),
     [members]
+  );
+
+  const currentMember = useMemo(
+    () => members.find((member) => member.id === user?.id) || null,
+    [members, user]
   );
 
   async function refreshFamily(familyId: string, shouldUpdate = true) {
@@ -478,6 +499,74 @@ export default function App() {
     }
   }
 
+  async function handleUpdateProfile(name: string, avatarFile: File | null, avatarUrl: string) {
+    if (!user) {
+      toast.error('Sessao expirada. Faca login novamente.');
+      setCurrentScreen('login');
+      return;
+    }
+
+    const cleanName = name.trim();
+    if (!cleanName) {
+      toast.error('Informe seu nome.');
+      return;
+    }
+
+    setLoadingAction(true);
+    try {
+      let finalAvatarUrl = avatarUrl.trim();
+
+      if (avatarFile) {
+        const extension = avatarFile.name.split('.').pop()?.toLowerCase() || 'jpg';
+        const filePath = `avatars/${user.id}-${Date.now()}.${extension}`;
+
+        const { error: uploadError } = await supabase.storage.from('pet-images').upload(filePath, avatarFile, {
+          upsert: true,
+          contentType: avatarFile.type || 'image/jpeg',
+        });
+
+        if (uploadError) {
+          throw uploadError;
+        }
+
+        const { data } = supabase.storage.from('pet-images').getPublicUrl(filePath);
+        finalAvatarUrl = data.publicUrl;
+      }
+
+      const { error: profileError } = await supabase
+        .from('profiles')
+        .update({
+          full_name: cleanName,
+          avatar_url: finalAvatarUrl || null,
+        })
+        .eq('id', user.id);
+
+      if (profileError) {
+        throw profileError;
+      }
+
+      const { error: authError } = await supabase.auth.updateUser({
+        data: { full_name: cleanName },
+      });
+
+      if (authError) {
+        throw authError;
+      }
+
+      if (family) {
+        await refreshFamily(family.id);
+      }
+
+      toast.success('Perfil atualizado com sucesso.');
+      setCurrentScreen('family-profile');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Nao foi possivel atualizar perfil.';
+      toast.error(message);
+    } finally {
+      setLoadingAction(false);
+    }
+  }
+
   if (bootstrapping && currentScreen === 'splash') {
     return <SplashScreen />;
   }
@@ -586,6 +675,13 @@ export default function App() {
             onNavigate={setCurrentScreen}
           />
         );
+      case 'notifications':
+        return (
+          <NotificationsScreen
+            activities={activities}
+            onNavigate={setCurrentScreen}
+          />
+        );
       case 'family-profile':
         if (!family) {
           return <SplashScreen />;
@@ -595,8 +691,20 @@ export default function App() {
             family={family}
             members={members}
             tasks={tasks}
+            currentUserName={currentMember?.name || user?.user_metadata?.full_name || user?.email?.split('@')[0] || 'Membro'}
+            currentUserAvatar={currentMember?.avatar || 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=200'}
             onLogout={handleLogout}
             onNavigate={setCurrentScreen}
+          />
+        );
+      case 'edit-profile':
+        return (
+          <EditProfileScreen
+            loading={loadingAction}
+            initialName={currentMember?.name || user?.user_metadata?.full_name || user?.email?.split('@')[0] || ''}
+            initialAvatar={currentMember?.avatar || 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=200'}
+            onBack={() => setCurrentScreen('family-profile')}
+            onSave={handleUpdateProfile}
           />
         );
       case 'ranking':
@@ -901,9 +1009,14 @@ function RankingScreen(props: RankingScreenProps) {
           <h1 className="font-brand text-xl font-bold text-primary leading-none">PetFamily</h1>
           <p className="text-[10px] text-slate-500 font-medium">{props.family.name}</p>
         </div>
-        <button onClick={() => props.onNavigate('family-profile')} className="p-2 bg-primary/10 text-primary rounded-xl relative">
-          <Bell size={20} />
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => props.onNavigate('edit-profile')} className="p-2 bg-primary/10 text-primary rounded-xl" aria-label="Abrir perfil">
+            <User size={20} />
+          </button>
+          <button onClick={() => props.onNavigate('notifications')} className="p-2 bg-primary/10 text-primary rounded-xl relative" aria-label="Abrir notificacoes">
+            <Bell size={20} />
+          </button>
+        </div>
       </header>
 
       <main className="p-4 space-y-8">
@@ -1445,7 +1558,7 @@ function TasksScreen(props: TasksScreenProps) {
       <header className="sticky top-0 z-10 bg-background-dark/80 backdrop-blur-md border-b border-white/5 p-4 flex items-center justify-between">
         <button className="p-2 text-primary"><Calendar size={24} /></button>
         <h1 className="font-bold text-lg">Tarefas</h1>
-        <button onClick={() => props.onNavigate('ranking')} className="p-2 bg-primary/10 text-primary rounded-full"><Bell size={20} /></button>
+        <button onClick={() => props.onNavigate('notifications')} className="p-2 bg-primary/10 text-primary rounded-full"><Bell size={20} /></button>
       </header>
 
       <main className="p-4 space-y-8">
@@ -1530,6 +1643,19 @@ function FamilyProfileScreen(props: FamilyProfileScreenProps) {
             </div>
             <p className="text-slate-500 text-xs">Compartilhe o codigo para convidar novos membros.</p>
           </div>
+
+          <div className="mt-6 w-full rounded-2xl bg-white/5 border border-white/10 p-4 flex items-center gap-3">
+            <div className="w-14 h-14 rounded-full overflow-hidden border-2 border-primary/30">
+              <img src={props.currentUserAvatar} alt={props.currentUserName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+            </div>
+            <div className="flex-1 text-left">
+              <p className="text-xs text-slate-400">Seu perfil</p>
+              <p className="font-bold">{props.currentUserName}</p>
+            </div>
+            <button onClick={() => props.onNavigate('edit-profile')} className="px-3 py-1.5 rounded-lg bg-primary/15 text-primary text-xs font-bold">
+              Editar
+            </button>
+          </div>
         </div>
 
         <div className="px-4 flex gap-3">
@@ -1565,6 +1691,136 @@ function FamilyProfileScreen(props: FamilyProfileScreenProps) {
       </div>
 
       <BottomNav active="family" onNavigate={props.onNavigate} />
+    </div>
+  );
+}
+
+function NotificationsScreen(props: NotificationsScreenProps) {
+  return (
+    <div className="h-full flex flex-col overflow-y-auto custom-scrollbar pb-24">
+      <header className="sticky top-0 z-10 bg-background-dark/80 backdrop-blur-md border-b border-white/5 p-4 flex items-center justify-between">
+        <button onClick={() => props.onNavigate('ranking')} className="p-2 text-slate-100"><ArrowLeft /></button>
+        <h1 className="font-bold text-lg">Notificacoes</h1>
+        <div className="w-10" />
+      </header>
+
+      <main className="p-4 space-y-3">
+        {props.activities.length === 0 && (
+          <div className="rounded-2xl p-6 bg-white/5 border border-white/10 text-center text-slate-400">
+            Sem notificacoes por enquanto.
+          </div>
+        )}
+
+        {props.activities.map((activity) => (
+          <div key={activity.id} className="flex items-start gap-3 p-3 rounded-xl bg-white/5 border border-white/5">
+            <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center shrink-0">
+              {activity.type === 'food' && <PawPrint size={16} className="text-primary" />}
+              {activity.type === 'walk' && <Footprints size={16} className="text-blue-500" />}
+              {activity.type === 'medicine' && <Pill size={16} className="text-emerald-500" />}
+              {activity.type === 'bath' && <Bath size={16} className="text-sky-500" />}
+            </div>
+            <div className="flex-1">
+              <p className="text-sm font-medium">
+                <span className="font-bold">{activity.userName}</span> {activity.action} <span className="font-bold">{activity.petName}</span>
+              </p>
+              <p className="text-[10px] text-slate-500">{activity.time}</p>
+            </div>
+            <span className="text-xs font-bold text-green-500">+{activity.points} pts</span>
+          </div>
+        ))}
+      </main>
+
+      <BottomNav active="ranking" onNavigate={props.onNavigate} />
+    </div>
+  );
+}
+
+function EditProfileScreen(props: EditProfileScreenProps) {
+  const [name, setName] = useState(props.initialName);
+  const [avatarUrl, setAvatarUrl] = useState(props.initialAvatar);
+  const [avatarFile, setAvatarFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+
+  const handleFile = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    if (!file.type.startsWith('image/')) {
+      toast.error('Selecione um arquivo de imagem.');
+      return;
+    }
+
+    setAvatarFile(file);
+    if (previewUrl) {
+      URL.revokeObjectURL(previewUrl);
+    }
+    setPreviewUrl(URL.createObjectURL(file));
+  };
+
+  const onSubmit = async () => {
+    await props.onSave(name, avatarFile, avatarUrl);
+    if (previewUrl) {
+      URL.revokeObjectURL(previewUrl);
+    }
+  };
+
+  return (
+    <div className="h-full flex flex-col overflow-y-auto custom-scrollbar pb-8">
+      <header className="sticky top-0 z-10 bg-background-dark/80 backdrop-blur-md border-b border-white/5 p-4 flex items-center justify-between">
+        <button onClick={props.onBack} className="p-2 text-slate-100"><ArrowLeft /></button>
+        <h1 className="font-bold text-lg">Editar Perfil</h1>
+        <div className="w-10" />
+      </header>
+
+      <main className="p-4 space-y-5">
+        <div className="rounded-2xl bg-white/5 border border-white/10 p-4">
+          <div className="mx-auto w-28 h-28 rounded-full overflow-hidden border-2 border-primary/40">
+            <img src={previewUrl || avatarUrl || props.initialAvatar} alt={name || 'Perfil'} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+          </div>
+          <label className="mt-4 w-full h-10 rounded-xl bg-primary/15 text-primary text-sm font-bold flex items-center justify-center gap-2 cursor-pointer">
+            <Camera size={16} /> Enviar foto
+            <input type="file" accept="image/*" onChange={handleFile} className="hidden" />
+          </label>
+        </div>
+
+        <div className="space-y-2">
+          <label className="text-xs font-bold uppercase tracking-wider text-slate-400">Nome</label>
+          <input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            className="w-full h-12 bg-white/5 border border-white/10 rounded-xl px-4 focus:ring-2 focus:ring-primary outline-none"
+          />
+        </div>
+
+        <div className="space-y-2">
+          <label className="text-xs font-bold uppercase tracking-wider text-slate-400">Foto por URL (opcional)</label>
+          <input
+            value={avatarUrl}
+            onChange={(event) => {
+              setAvatarUrl(event.target.value);
+              if (avatarFile) {
+                setAvatarFile(null);
+                if (previewUrl) {
+                  URL.revokeObjectURL(previewUrl);
+                  setPreviewUrl(null);
+                }
+              }
+            }}
+            placeholder="https://..."
+            className="w-full h-12 bg-white/5 border border-white/10 rounded-xl px-4 focus:ring-2 focus:ring-primary outline-none"
+          />
+        </div>
+
+        <button
+          disabled={props.loading}
+          onClick={onSubmit}
+          className="w-full h-12 rounded-xl bg-primary text-white font-bold disabled:opacity-60"
+        >
+          {props.loading ? 'Salvando...' : 'Salvar perfil'}
+        </button>
+      </main>
     </div>
   );
 }

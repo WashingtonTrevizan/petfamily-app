@@ -54,6 +54,12 @@ function generateInviteCode() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
 }
 
+function isMissingClinicalNotesColumn(errorMessage?: string) {
+  if (!errorMessage) return false;
+  const normalized = errorMessage.toLowerCase();
+  return normalized.includes('column pets.clinical_notes does not exist');
+}
+
 function isToday(date: Date) {
   const now = new Date();
   return (
@@ -108,6 +114,7 @@ export async function getUserFamily(userId: string): Promise<FamilyInfo | null> 
     .from('family_members')
     .select('family_id')
     .eq('user_id', userId)
+    .order('joined_at', { ascending: false })
     .limit(1)
     .maybeSingle();
 
@@ -115,24 +122,60 @@ export async function getUserFamily(userId: string): Promise<FamilyInfo | null> 
     throw new Error(membershipError.message);
   }
 
-  if (!membership) {
+  if (membership) {
+    const { data: family, error: familyError } = await supabase
+      .from('families')
+      .select('id, name, invite_code')
+      .eq('id', membership.family_id)
+      .maybeSingle();
+
+    if (familyError) {
+      throw new Error(familyError.message);
+    }
+
+    if (family) {
+      return {
+        id: family.id,
+        name: family.name,
+        inviteCode: family.invite_code,
+      };
+    }
+  }
+
+  // Fallback: user might be the family creator but membership row was removed.
+  const { data: ownedFamily, error: ownedFamilyError } = await supabase
+    .from('families')
+    .select('id, name, invite_code')
+    .eq('created_by', userId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (ownedFamilyError) {
+    throw new Error(ownedFamilyError.message);
+  }
+
+  if (!ownedFamily) {
     return null;
   }
 
-  const { data: family, error: familyError } = await supabase
-    .from('families')
-    .select('id, name, invite_code')
-    .eq('id', membership.family_id)
-    .single();
+  const { error: recoverMembershipError } = await supabase.from('family_members').upsert(
+    {
+      family_id: ownedFamily.id,
+      user_id: userId,
+      role: 'admin',
+    },
+    { onConflict: 'family_id,user_id' }
+  );
 
-  if (familyError) {
-    throw new Error(familyError.message);
+  if (recoverMembershipError) {
+    throw new Error(recoverMembershipError.message);
   }
 
   return {
-    id: family.id,
-    name: family.name,
-    inviteCode: family.invite_code,
+    id: ownedFamily.id,
+    name: ownedFamily.name,
+    inviteCode: ownedFamily.invite_code,
   };
 }
 
@@ -276,14 +319,56 @@ export async function loadFamilyBundle(familyId: string): Promise<FamilyBundle> 
     };
   });
 
-  const { data: petRows, error: petError } = await supabase
+  const { data: petRowsWithNotes, error: petError } = await supabase
     .from('pets')
     .select('id, name, type, breed, age, status, image_url, clinical_notes')
     .eq('family_id', familyId)
     .order('created_at', { ascending: true });
 
+  let petRows: Array<{
+    id: string;
+    name: string;
+    type: Pet['type'];
+    breed: string | null;
+    age: string | null;
+    status: Pet['status'];
+    image_url: string | null;
+    clinical_notes?: string | null;
+  }> = (petRowsWithNotes as Array<{
+    id: string;
+    name: string;
+    type: Pet['type'];
+    breed: string | null;
+    age: string | null;
+    status: Pet['status'];
+    image_url: string | null;
+    clinical_notes?: string | null;
+  }> | null) || [];
   if (petError) {
-    throw new Error(petError.message);
+    if (!isMissingClinicalNotesColumn(petError.message)) {
+      throw new Error(petError.message);
+    }
+
+    const { data: legacyPetRows, error: legacyPetError } = await supabase
+      .from('pets')
+      .select('id, name, type, breed, age, status, image_url')
+      .eq('family_id', familyId)
+      .order('created_at', { ascending: true });
+
+    if (legacyPetError) {
+      throw new Error(legacyPetError.message);
+    }
+
+    petRows = (legacyPetRows as Array<{
+      id: string;
+      name: string;
+      type: Pet['type'];
+      breed: string | null;
+      age: string | null;
+      status: Pet['status'];
+      image_url: string | null;
+      clinical_notes?: string | null;
+    }> | null) || [];
   }
 
   const pets: Pet[] = (petRows || []).map((pet) => ({
@@ -294,7 +379,7 @@ export async function loadFamilyBundle(familyId: string): Promise<FamilyBundle> 
     age: pet.age || 'Idade nao informada',
     status: pet.status === 'vaccine-due' ? 'vaccine-due' : 'healthy',
     image: pet.image_url || DEFAULT_PET_IMAGE,
-    clinicalNotes: pet.clinical_notes || undefined,
+    clinicalNotes: 'clinical_notes' in pet ? pet.clinical_notes || undefined : undefined,
     owners: members.map((member) => member.id),
   }));
 
@@ -385,7 +470,7 @@ export async function addPet(familyId: string, input: NewPetInput, createdBy: st
   const imageUrl = uploadedImageUrl || input.imageUrl?.trim() || DEFAULT_PET_IMAGE;
   const clinicalNotes = input.clinicalNotes?.trim() || null;
 
-  const { error } = await supabase.from('pets').insert({
+  const petPayload = {
     family_id: familyId,
     name: cleanName,
     type: input.type,
@@ -395,7 +480,28 @@ export async function addPet(familyId: string, input: NewPetInput, createdBy: st
     image_url: imageUrl,
     clinical_notes: clinicalNotes,
     created_by: createdBy,
-  });
+  };
+
+  const { error } = await supabase.from('pets').insert(petPayload);
+
+  if (error && isMissingClinicalNotesColumn(error.message)) {
+    const { error: fallbackError } = await supabase.from('pets').insert({
+      family_id: familyId,
+      name: cleanName,
+      type: input.type,
+      breed,
+      age,
+      status: input.status,
+      image_url: imageUrl,
+      created_by: createdBy,
+    });
+
+    if (fallbackError) {
+      throw new Error(fallbackError.message);
+    }
+
+    return;
+  }
 
   if (error) {
     throw new Error(error.message);
@@ -414,18 +520,40 @@ export async function updatePet(petId: string, familyId: string, userId: string,
   const imageUrl = uploadedImageUrl || input.imageUrl?.trim() || DEFAULT_PET_IMAGE;
   const clinicalNotes = input.clinicalNotes?.trim() || null;
 
+  const updatePayload = {
+    name: cleanName,
+    type: input.type,
+    breed,
+    age,
+    status: input.status,
+    image_url: imageUrl,
+    clinical_notes: clinicalNotes,
+  };
+
   const { error } = await supabase
     .from('pets')
-    .update({
-      name: cleanName,
-      type: input.type,
-      breed,
-      age,
-      status: input.status,
-      image_url: imageUrl,
-      clinical_notes: clinicalNotes,
-    })
+    .update(updatePayload)
     .eq('id', petId);
+
+  if (error && isMissingClinicalNotesColumn(error.message)) {
+    const { error: fallbackError } = await supabase
+      .from('pets')
+      .update({
+        name: cleanName,
+        type: input.type,
+        breed,
+        age,
+        status: input.status,
+        image_url: imageUrl,
+      })
+      .eq('id', petId);
+
+    if (fallbackError) {
+      throw new Error(fallbackError.message);
+    }
+
+    return;
+  }
 
   if (error) {
     throw new Error(error.message);
