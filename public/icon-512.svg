@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="PetFamily icon">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#341f13" />
+      <stop offset="100%" stop-color="#1a120e" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="url(#bg)" />
+  <g fill="#ec5b13">
+    <circle cx="155" cy="165" r="38" />
+    <circle cx="230" cy="134" r="35" />
+    <circle cx="282" cy="134" r="35" />
+    <circle cx="357" cy="165" r="38" />
+    <path d="M256 196c-68 0-121 44-121 99 0 42 31 74 75 74 20 0 35-7 45-15 10-8 17-15 26-15s16 7 26 15c10 8 25 15 45 15 44 0 75-32 75-74 0-55-53-99-121-99z" />
+  </g>
+</svg>

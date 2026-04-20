@@ -1,0 +1,5 @@
+{
+  "name": "PetFamily",
+  "description": "A collaborative pet care app for families to manage tasks, track health, and compete in a friendly ranking.",
+  "requestFramePermissions": []
+}
