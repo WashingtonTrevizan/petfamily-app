@@ -60,6 +60,12 @@ function isMissingClinicalNotesColumn(errorMessage?: string) {
   return normalized.includes('column pets.clinical_notes does not exist');
 }
 
+function isMissingTaskPointsColumn(errorMessage?: string) {
+  if (!errorMessage) return false;
+  const normalized = errorMessage.toLowerCase();
+  return normalized.includes('column tasks.reward_points does not exist');
+}
+
 function isToday(date: Date) {
   const now = new Date();
   return (
@@ -385,14 +391,54 @@ export async function loadFamilyBundle(familyId: string): Promise<FamilyBundle> 
 
   const petById = new Map(pets.map((pet) => [pet.id, pet]));
 
-  const { data: taskRows, error: taskError } = await supabase
+  const { data: taskRowsWithPoints, error: taskError } = await supabase
     .from('tasks')
-    .select('id, title, scheduled_at, assigned_to, pet_id, completed')
+    .select('id, title, scheduled_at, assigned_to, pet_id, completed, reward_points')
     .eq('family_id', familyId)
     .order('scheduled_at', { ascending: true });
 
+  let taskRows: Array<{
+    id: string;
+    title: string;
+    scheduled_at: string;
+    assigned_to: string | null;
+    pet_id: string | null;
+    completed: boolean;
+    reward_points?: number | null;
+  }> = (taskRowsWithPoints as Array<{
+    id: string;
+    title: string;
+    scheduled_at: string;
+    assigned_to: string | null;
+    pet_id: string | null;
+    completed: boolean;
+    reward_points?: number | null;
+  }> | null) || [];
+
   if (taskError) {
-    throw new Error(taskError.message);
+    if (!isMissingTaskPointsColumn(taskError.message)) {
+      throw new Error(taskError.message);
+    }
+
+    const { data: legacyTaskRows, error: legacyTaskError } = await supabase
+      .from('tasks')
+      .select('id, title, scheduled_at, assigned_to, pet_id, completed')
+      .eq('family_id', familyId)
+      .order('scheduled_at', { ascending: true });
+
+    if (legacyTaskError) {
+      throw new Error(legacyTaskError.message);
+    }
+
+    taskRows = (legacyTaskRows as Array<{
+      id: string;
+      title: string;
+      scheduled_at: string;
+      assigned_to: string | null;
+      pet_id: string | null;
+      completed: boolean;
+      reward_points?: number | null;
+    }> | null) || [];
   }
 
   const tasks: Task[] = (taskRows || []).map((task) => {
@@ -407,6 +453,7 @@ export async function loadFamilyBundle(familyId: string): Promise<FamilyBundle> 
       assignedTo: assignedMember?.name,
       petId: task.pet_id || undefined,
       petName: petById.get(task.pet_id)?.name || 'Pet',
+      points: Number(task.reward_points ?? 20),
       completed: Boolean(task.completed),
     };
   });
@@ -572,13 +619,91 @@ export async function assignTask(taskId: string, userId: string) {
   }
 }
 
+export async function createTask(
+  familyId: string,
+  title: string,
+  petId: string | null,
+  scheduledAt: string,
+  points: number
+) {
+  const cleanTitle = title.trim();
+  if (!cleanTitle) {
+    throw new Error('Informe o titulo da tarefa.');
+  }
+
+  const parsedPoints = Number(points);
+  const rewardPoints = Number.isFinite(parsedPoints) ? Math.max(0, Math.floor(parsedPoints)) : 0;
+
+  const { error } = await supabase.from('tasks').insert({
+    family_id: familyId,
+    pet_id: petId,
+    title: cleanTitle,
+    scheduled_at: scheduledAt,
+    reward_points: rewardPoints,
+  });
+
+  if (error && isMissingTaskPointsColumn(error.message)) {
+    const { error: fallbackError } = await supabase.from('tasks').insert({
+      family_id: familyId,
+      pet_id: petId,
+      title: cleanTitle,
+      scheduled_at: scheduledAt,
+    });
+
+    if (fallbackError) {
+      throw new Error(fallbackError.message);
+    }
+
+    return;
+  }
+
+  if (error) {
+    throw new Error(error.message);
+  }
+}
+
 export async function completeTask(taskId: string, userId: string, familyId: string, petId?: string) {
+  let rewardPoints = 20;
+  let resolvedPetId: string | null = petId || null;
+
+  const { data: taskWithPoints, error: taskLookupError } = await supabase
+    .from('tasks')
+    .select('pet_id, reward_points')
+    .eq('id', taskId)
+    .maybeSingle();
+
+  if (taskLookupError && !isMissingTaskPointsColumn(taskLookupError.message)) {
+    throw new Error(taskLookupError.message);
+  }
+
+  if (taskLookupError && isMissingTaskPointsColumn(taskLookupError.message)) {
+    const { data: legacyTask, error: legacyTaskError } = await supabase
+      .from('tasks')
+      .select('pet_id')
+      .eq('id', taskId)
+      .maybeSingle();
+
+    if (legacyTaskError) {
+      throw new Error(legacyTaskError.message);
+    }
+
+    if (!resolvedPetId && legacyTask?.pet_id) {
+      resolvedPetId = legacyTask.pet_id;
+    }
+  } else {
+    if (!resolvedPetId && taskWithPoints?.pet_id) {
+      resolvedPetId = taskWithPoints.pet_id;
+    }
+    rewardPoints = Number(taskWithPoints?.reward_points ?? 20);
+  }
+
   const { error: taskError } = await supabase
     .from('tasks')
     .update({
       completed: true,
       completed_by: userId,
       completed_at: new Date().toISOString(),
+      pet_id: resolvedPetId,
     })
     .eq('id', taskId);
 
@@ -598,7 +723,7 @@ export async function completeTask(taskId: string, userId: string, familyId: str
 
   const { error: pointsError } = await supabase
     .from('profiles')
-    .update({ points: Number(profile.points || 0) + 20 })
+    .update({ points: Number(profile.points || 0) + rewardPoints })
     .eq('id', userId);
 
   if (pointsError) {
@@ -607,10 +732,10 @@ export async function completeTask(taskId: string, userId: string, familyId: str
 
   const { error: activityError } = await supabase.from('activities').insert({
     family_id: familyId,
-    pet_id: petId || null,
+    pet_id: resolvedPetId || null,
     user_id: userId,
     action: 'concluiu tarefa para',
-    points: 20,
+    points: rewardPoints,
     type: 'food',
   });
 

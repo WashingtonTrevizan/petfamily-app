@@ -49,6 +49,7 @@ export interface Task {
   assignedTo?: string;
   petId?: string;
   petName: string;
+  points: number;
   completed: boolean;
 }
 

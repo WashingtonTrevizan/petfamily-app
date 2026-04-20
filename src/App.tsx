@@ -31,6 +31,7 @@ import {
   addPet,
   assignTask,
   completeTask,
+  createTask,
   createFamily,
   ensureProfile,
   getUserFamily,
@@ -119,6 +120,7 @@ interface TasksScreenProps {
   currentUser: SupabaseUser;
   family: FamilyInfo;
   onRefresh: () => Promise<void>;
+  onCreateTask: (title: string, petId: string | null, scheduledAt: string, points: number) => Promise<void>;
   onNavigate: (screen: Screen) => void;
 }
 
@@ -474,6 +476,23 @@ export default function App() {
     }
   }
 
+  async function handleCreateTask(title: string, petId: string | null, scheduledAt: string, points: number) {
+    if (!family) {
+      toast.error('Crie ou entre em uma familia antes.');
+      return;
+    }
+
+    try {
+      await createTask(family.id, title, petId, scheduledAt, points);
+      await refreshFamily(family.id);
+      toast.success('Tarefa criada com sucesso.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Nao foi possivel criar tarefa.';
+      toast.error(message);
+      throw error;
+    }
+  }
+
   function handleOpenPetDetails(petId: string) {
     setSelectedPetId(petId);
     setCurrentScreen('edit-pet');
@@ -682,6 +701,7 @@ export default function App() {
             currentUser={user}
             family={family}
             onRefresh={handleRefreshData}
+            onCreateTask={handleCreateTask}
             onNavigate={setCurrentScreen}
           />
         );
@@ -1519,8 +1539,19 @@ function EditPetScreen(props: EditPetScreenProps) {
 function TasksScreen(props: TasksScreenProps) {
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
   const [selectedPetByTask, setSelectedPetByTask] = useState<Record<string, string>>({});
+  const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [newTaskPetId, setNewTaskPetId] = useState('');
+  const [newTaskDateTime, setNewTaskDateTime] = useState('');
+  const [newTaskPoints, setNewTaskPoints] = useState('20');
+  const [submittingTask, setSubmittingTask] = useState(false);
 
   const firstPet = props.pets[0] || null;
+
+  useEffect(() => {
+    if (!newTaskPetId && firstPet?.id) {
+      setNewTaskPetId(firstPet.id);
+    }
+  }, [firstPet, newTaskPetId]);
 
   const submitActivity = async (type: Activity['type'], label: string, points: number, action: string) => {
     try {
@@ -1555,12 +1586,52 @@ function TasksScreen(props: TasksScreenProps) {
     try {
       await completeTask(taskId, props.currentUser.id, props.family.id, selectedPetId);
       await props.onRefresh();
-      toast.success('Tarefa concluida! +20 pts');
+      toast.success(`Tarefa concluida! +${task?.points ?? 20} pts`);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Erro ao concluir tarefa.';
       toast.error(message);
     } finally {
       setBusyTaskId(null);
+    }
+  };
+
+  const onCreateTask = async () => {
+    const cleanTitle = newTaskTitle.trim();
+    if (!cleanTitle) {
+      toast.error('Informe o titulo da tarefa.');
+      return;
+    }
+
+    if (!newTaskDateTime) {
+      toast.error('Escolha data e horario da tarefa.');
+      return;
+    }
+
+    const parsedPoints = Number(newTaskPoints);
+    if (!Number.isFinite(parsedPoints) || parsedPoints < 0) {
+      toast.error('Informe uma pontuacao valida.');
+      return;
+    }
+
+    setSubmittingTask(true);
+    try {
+      await props.onCreateTask(
+        cleanTitle,
+        newTaskPetId || null,
+        new Date(newTaskDateTime).toISOString(),
+        Math.floor(parsedPoints)
+      );
+
+      setNewTaskTitle('');
+      setNewTaskDateTime('');
+      setNewTaskPoints('20');
+      if (firstPet?.id) {
+        setNewTaskPetId(firstPet.id);
+      }
+    } catch {
+      // Erro tratado na camada pai.
+    } finally {
+      setSubmittingTask(false);
     }
   };
 
@@ -1590,6 +1661,54 @@ function TasksScreen(props: TasksScreenProps) {
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-xl font-bold">Proximos Agendamentos</h2>
           </div>
+          <div className="mb-4 p-4 rounded-2xl bg-white/5 border border-white/10 space-y-3">
+            <h3 className="font-bold text-sm">Nova tarefa</h3>
+            <input
+              value={newTaskTitle}
+              onChange={(event) => setNewTaskTitle(event.target.value)}
+              placeholder="Ex: Dar remedio"
+              className="w-full h-10 bg-white/5 border border-white/10 rounded-xl px-3 text-sm focus:ring-2 focus:ring-primary outline-none"
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <select
+                value={newTaskPetId}
+                onChange={(event) => setNewTaskPetId(event.target.value)}
+                className="h-10 bg-white/5 border border-white/10 rounded-xl px-3 text-sm focus:ring-2 focus:ring-primary outline-none disabled:opacity-50"
+                disabled={props.pets.length === 0}
+              >
+                {props.pets.length === 0 ? (
+                  <option value="">Sem pets</option>
+                ) : (
+                  props.pets.map((pet) => (
+                    <option key={pet.id} value={pet.id}>
+                      {pet.name}
+                    </option>
+                  ))
+                )}
+              </select>
+              <input
+                type="number"
+                min={0}
+                value={newTaskPoints}
+                onChange={(event) => setNewTaskPoints(event.target.value)}
+                placeholder="Pontos"
+                className="h-10 bg-white/5 border border-white/10 rounded-xl px-3 text-sm focus:ring-2 focus:ring-primary outline-none"
+              />
+            </div>
+            <input
+              type="datetime-local"
+              value={newTaskDateTime}
+              onChange={(event) => setNewTaskDateTime(event.target.value)}
+              className="w-full h-10 bg-white/5 border border-white/10 rounded-xl px-3 text-sm focus:ring-2 focus:ring-primary outline-none"
+            />
+            <button
+              onClick={onCreateTask}
+              disabled={submittingTask}
+              className="h-10 px-4 rounded-xl bg-primary text-white text-xs font-bold uppercase tracking-wider disabled:opacity-60"
+            >
+              {submittingTask ? 'Criando...' : 'Cadastrar tarefa'}
+            </button>
+          </div>
           <div className="space-y-3">
             {props.tasks.length === 0 && <p className="text-slate-500 text-sm">Sem tarefas cadastradas ainda.</p>}
             {props.tasks.map((task) => (
@@ -1603,6 +1722,7 @@ function TasksScreen(props: TasksScreenProps) {
                   <span className="text-[10px] text-slate-500 font-medium">
                     {task.assignedTo ? `Atribuido a: ${task.assignedTo}` : 'Nao atribuido'}
                   </span>
+                  <p className="text-[10px] text-primary font-bold">+{task.points} pts</p>
                   {props.pets.length > 0 && (
                     <div className="mt-2">
                       <label className="text-[10px] text-slate-400 mr-2">Pet da tarefa:</label>

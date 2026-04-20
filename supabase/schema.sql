@@ -46,12 +46,15 @@ create table if not exists public.tasks (
   pet_id uuid references public.pets(id) on delete set null,
   title text not null,
   scheduled_at timestamptz not null default now(),
+  reward_points integer not null default 20,
   assigned_to uuid references public.profiles(id) on delete set null,
   completed boolean not null default false,
   completed_by uuid references public.profiles(id) on delete set null,
   completed_at timestamptz,
   created_at timestamptz not null default now()
 );
+
+alter table public.tasks add column if not exists reward_points integer not null default 20;
 
 create table if not exists public.activities (
   id uuid primary key default gen_random_uuid(),
