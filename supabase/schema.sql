@@ -67,6 +67,21 @@ create table if not exists public.activities (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.push_subscriptions (
+  id uuid primary key default gen_random_uuid(),
+  family_id uuid not null references public.families(id) on delete cascade,
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  endpoint text not null unique,
+  p256dh text not null,
+  auth text not null,
+  user_agent text,
+  last_seen timestamptz not null default now(),
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_push_subscriptions_family_id on public.push_subscriptions (family_id);
+create index if not exists idx_push_subscriptions_user_id on public.push_subscriptions (user_id);
+
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
@@ -109,6 +124,7 @@ alter table public.family_members enable row level security;
 alter table public.pets enable row level security;
 alter table public.tasks enable row level security;
 alter table public.activities enable row level security;
+alter table public.push_subscriptions enable row level security;
 
 insert into storage.buckets (id, name, public)
 values ('pet-images', 'pet-images', true)
@@ -270,3 +286,29 @@ create policy "activities_insert_member"
 on public.activities
 for insert
 with check (public.is_family_member(family_id) and user_id = auth.uid());
+
+-- Push subscriptions policies
+drop policy if exists "push_subscriptions_select_member" on public.push_subscriptions;
+create policy "push_subscriptions_select_member"
+on public.push_subscriptions
+for select
+using (public.is_family_member(family_id));
+
+drop policy if exists "push_subscriptions_insert_own" on public.push_subscriptions;
+create policy "push_subscriptions_insert_own"
+on public.push_subscriptions
+for insert
+with check (user_id = auth.uid() and public.is_family_member(family_id));
+
+drop policy if exists "push_subscriptions_update_own" on public.push_subscriptions;
+create policy "push_subscriptions_update_own"
+on public.push_subscriptions
+for update
+using (user_id = auth.uid() and public.is_family_member(family_id))
+with check (user_id = auth.uid() and public.is_family_member(family_id));
+
+drop policy if exists "push_subscriptions_delete_own" on public.push_subscriptions;
+create policy "push_subscriptions_delete_own"
+on public.push_subscriptions
+for delete
+using (user_id = auth.uid());

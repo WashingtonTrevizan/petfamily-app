@@ -31,18 +31,24 @@ import {
   addPet,
   assignTask,
   completeTask,
+  createRoutineFlowTasks,
   createTask,
   createFamily,
   ensureProfile,
   getUserFamily,
   joinFamily,
   loadFamilyBundle,
-  registerActivity,
+  type RoutineStepInput,
   type FamilyInfo,
   type NewPetInput,
   updatePet,
   type UpdatePetInput,
 } from './services/familyApi';
+import {
+  hasActivePushSubscription,
+  subscribeForPushNotifications,
+  unsubscribeFromPushNotifications,
+} from './services/pushNotifications';
 
 interface LoginScreenProps {
   loading: boolean;
@@ -121,6 +127,7 @@ interface TasksScreenProps {
   family: FamilyInfo;
   onRefresh: () => Promise<void>;
   onCreateTask: (title: string, petId: string | null, scheduledAt: string, points: number) => Promise<void>;
+  onCreateRoutineFlow: (routineName: string, petId: string | null, startAt: string, steps: RoutineStepInput[]) => Promise<void>;
   onNavigate: (screen: Screen) => void;
 }
 
@@ -136,6 +143,8 @@ interface FamilyProfileScreenProps {
 
 interface NotificationsScreenProps {
   activities: Activity[];
+  family: FamilyInfo;
+  currentUser: SupabaseUser;
   onNavigate: (screen: Screen) => void;
 }
 
@@ -493,6 +502,28 @@ export default function App() {
     }
   }
 
+  async function handleCreateRoutineFlow(
+    routineName: string,
+    petId: string | null,
+    startAt: string,
+    steps: RoutineStepInput[]
+  ) {
+    if (!family) {
+      toast.error('Crie ou entre em uma familia antes.');
+      return;
+    }
+
+    try {
+      await createRoutineFlowTasks(family.id, petId, startAt, routineName, steps);
+      await refreshFamily(family.id);
+      toast.success('Fluxo de rotina criado com sucesso.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Nao foi possivel criar o fluxo de rotina.';
+      toast.error(message);
+      throw error;
+    }
+  }
+
   function handleOpenPetDetails(petId: string) {
     setSelectedPetId(petId);
     setCurrentScreen('edit-pet');
@@ -702,13 +733,19 @@ export default function App() {
             family={family}
             onRefresh={handleRefreshData}
             onCreateTask={handleCreateTask}
+            onCreateRoutineFlow={handleCreateRoutineFlow}
             onNavigate={setCurrentScreen}
           />
         );
       case 'notifications':
+        if (!user || !family) {
+          return <SplashScreen />;
+        }
         return (
           <NotificationsScreen
             activities={activities}
+            family={family}
+            currentUser={user}
             onNavigate={setCurrentScreen}
           />
         );
@@ -1539,6 +1576,16 @@ function EditPetScreen(props: EditPetScreenProps) {
 function TasksScreen(props: TasksScreenProps) {
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
   const [selectedPetByTask, setSelectedPetByTask] = useState<Record<string, string>>({});
+
+  const [routineName, setRoutineName] = useState('');
+  const [routinePetId, setRoutinePetId] = useState('');
+  const [routineStartAt, setRoutineStartAt] = useState('');
+  const [routineSteps, setRoutineSteps] = useState<Array<{ id: string; title: string; points: string }>>([
+    { id: '1', title: 'Dar comida e trocar agua', points: '10' },
+    { id: '2', title: 'Passear', points: '15' },
+  ]);
+  const [submittingRoutine, setSubmittingRoutine] = useState(false);
+
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [newTaskPetId, setNewTaskPetId] = useState('');
   const [newTaskDateTime, setNewTaskDateTime] = useState('');
@@ -1553,16 +1600,11 @@ function TasksScreen(props: TasksScreenProps) {
     }
   }, [firstPet, newTaskPetId]);
 
-  const submitActivity = async (type: Activity['type'], label: string, points: number, action: string) => {
-    try {
-      await registerActivity(props.family.id, props.currentUser.id, firstPet?.id || null, type, action, points);
-      await props.onRefresh();
-      toast.success(`Atividade registrada: ${label} (+${points} pts)`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Erro ao registrar atividade.';
-      toast.error(message);
+  useEffect(() => {
+    if (!routinePetId && firstPet?.id) {
+      setRoutinePetId(firstPet.id);
     }
-  };
+  }, [firstPet, routinePetId]);
 
   const onAssign = async (taskId: string) => {
     setBusyTaskId(taskId);
@@ -1635,6 +1677,85 @@ function TasksScreen(props: TasksScreenProps) {
     }
   };
 
+  const addRoutineStep = () => {
+    setRoutineSteps((prev) => [...prev, { id: String(Date.now()), title: '', points: '10' }]);
+  };
+
+  const removeRoutineStep = (id: string) => {
+    setRoutineSteps((prev) => prev.filter((step) => step.id !== id));
+  };
+
+  const updateRoutineStep = (id: string, field: 'title' | 'points', value: string) => {
+    setRoutineSteps((prev) =>
+      prev.map((step) => (step.id === id ? { ...step, [field]: value } : step))
+    );
+  };
+
+  const onCreateRoutineFlow = async () => {
+    const cleanRoutineName = routineName.trim();
+    if (!cleanRoutineName) {
+      toast.error('Informe o nome da rotina.');
+      return;
+    }
+
+    if (!routineStartAt) {
+      toast.error('Escolha a data e hora de inicio da rotina.');
+      return;
+    }
+
+    if (routineSteps.length === 0) {
+      toast.error('Adicione pelo menos um passo.');
+      return;
+    }
+
+    const parsedSteps: RoutineStepInput[] = [];
+    for (let index = 0; index < routineSteps.length; index += 1) {
+      const step = routineSteps[index];
+      const cleanTitle = step.title.trim();
+      const parsedPoints = Number(step.points);
+
+      if (!cleanTitle) {
+        toast.error(`Passo ${index + 1} precisa de titulo.`);
+        return;
+      }
+
+      if (!Number.isFinite(parsedPoints) || parsedPoints < 0) {
+        toast.error(`Passo ${index + 1} com pontuacao invalida.`);
+        return;
+      }
+
+      parsedSteps.push({
+        title: cleanTitle,
+        points: Math.floor(parsedPoints),
+        offsetMinutes: index,
+      });
+    }
+
+    setSubmittingRoutine(true);
+    try {
+      await props.onCreateRoutineFlow(
+        cleanRoutineName,
+        routinePetId || null,
+        new Date(routineStartAt).toISOString(),
+        parsedSteps
+      );
+
+      setRoutineName('');
+      setRoutineStartAt('');
+      setRoutineSteps([
+        { id: '1', title: 'Dar comida e trocar agua', points: '10' },
+        { id: '2', title: 'Passear', points: '15' },
+      ]);
+      if (firstPet?.id) {
+        setRoutinePetId(firstPet.id);
+      }
+    } catch {
+      // Erro tratado na camada pai.
+    } finally {
+      setSubmittingRoutine(false);
+    }
+  };
+
   return (
     <div className="h-full flex flex-col overflow-y-auto custom-scrollbar pb-24">
       <header className="sticky top-0 z-10 bg-background-dark/80 backdrop-blur-md border-b border-white/5 p-4 flex items-center justify-between">
@@ -1646,21 +1767,91 @@ function TasksScreen(props: TasksScreenProps) {
       <main className="p-4 space-y-8">
         <section>
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-bold">Registrar Atividade</h2>
-            <span className="text-[10px] font-bold uppercase tracking-widest text-primary">Ganhe Pontos</span>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <ActivityButton icon={<PawPrint size={20} />} label="Alimentar" points={10} onClick={() => submitActivity('food', 'Alimentar', 10, 'alimentou')} />
-            <ActivityButton icon={<Bath size={20} />} label="Banho" points={25} onClick={() => submitActivity('bath', 'Banho', 25, 'deu banho em')} />
-            <ActivityButton icon={<Footprints size={20} />} label="Passear" points={15} onClick={() => submitActivity('walk', 'Passear', 15, 'passeou com')} />
-            <ActivityButton icon={<Pill size={20} />} label="Remedio" points={20} onClick={() => submitActivity('medicine', 'Remedio', 20, 'deu remedio para')} />
-          </div>
-        </section>
-
-        <section>
-          <div className="flex items-center justify-between mb-4">
             <h2 className="text-xl font-bold">Proximos Agendamentos</h2>
           </div>
+          <div className="mb-4 p-4 rounded-2xl bg-white/5 border border-white/10 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="font-bold text-sm">Fluxo de rotina</h3>
+              <span className="text-[10px] uppercase tracking-wider text-primary font-bold">Passo a passo</span>
+            </div>
+
+            <input
+              value={routineName}
+              onChange={(event) => setRoutineName(event.target.value)}
+              placeholder="Ex: Rotina da manha"
+              className="w-full h-10 bg-white/5 border border-white/10 rounded-xl px-3 text-sm focus:ring-2 focus:ring-primary outline-none"
+            />
+
+            <div className="grid grid-cols-2 gap-2">
+              <select
+                value={routinePetId}
+                onChange={(event) => setRoutinePetId(event.target.value)}
+                className="h-10 bg-white/5 border border-white/10 rounded-xl px-3 text-sm focus:ring-2 focus:ring-primary outline-none disabled:opacity-50"
+                disabled={props.pets.length === 0}
+              >
+                {props.pets.length === 0 ? (
+                  <option value="">Sem pets</option>
+                ) : (
+                  props.pets.map((pet) => (
+                    <option key={pet.id} value={pet.id}>
+                      {pet.name}
+                    </option>
+                  ))
+                )}
+              </select>
+              <input
+                type="datetime-local"
+                value={routineStartAt}
+                onChange={(event) => setRoutineStartAt(event.target.value)}
+                className="h-10 bg-white/5 border border-white/10 rounded-xl px-3 text-sm focus:ring-2 focus:ring-primary outline-none"
+              />
+            </div>
+
+            <div className="space-y-2">
+              {routineSteps.map((step, index) => (
+                <div key={step.id} className="grid grid-cols-[1fr_86px_34px] gap-2 items-center">
+                  <input
+                    value={step.title}
+                    onChange={(event) => updateRoutineStep(step.id, 'title', event.target.value)}
+                    placeholder={`Passo ${index + 1}`}
+                    className="h-10 bg-white/5 border border-white/10 rounded-xl px-3 text-sm focus:ring-2 focus:ring-primary outline-none"
+                  />
+                  <input
+                    type="number"
+                    min={0}
+                    value={step.points}
+                    onChange={(event) => updateRoutineStep(step.id, 'points', event.target.value)}
+                    placeholder="Pontos"
+                    className="h-10 bg-white/5 border border-white/10 rounded-xl px-3 text-sm focus:ring-2 focus:ring-primary outline-none"
+                  />
+                  <button
+                    onClick={() => removeRoutineStep(step.id)}
+                    disabled={routineSteps.length <= 1}
+                    className="h-10 rounded-xl bg-white/10 text-slate-200 text-xs font-bold disabled:opacity-40"
+                  >
+                    X
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                onClick={addRoutineStep}
+                className="h-10 px-3 rounded-xl bg-white/10 text-slate-100 text-xs font-bold uppercase tracking-wider"
+              >
+                Adicionar passo
+              </button>
+              <button
+                onClick={onCreateRoutineFlow}
+                disabled={submittingRoutine}
+                className="h-10 px-4 rounded-xl bg-primary text-white text-xs font-bold uppercase tracking-wider disabled:opacity-60"
+              >
+                {submittingRoutine ? 'Criando fluxo...' : 'Criar fluxo'}
+              </button>
+            </div>
+          </div>
+
           <div className="mb-4 p-4 rounded-2xl bg-white/5 border border-white/10 space-y-3">
             <h3 className="font-bold text-sm">Nova tarefa</h3>
             <input
@@ -1859,6 +2050,60 @@ function FamilyProfileScreen(props: FamilyProfileScreenProps) {
 }
 
 function NotificationsScreen(props: NotificationsScreenProps) {
+  const [pushEnabled, setPushEnabled] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const checkSubscription = async () => {
+      try {
+        const active = await hasActivePushSubscription();
+        if (mounted) {
+          setPushEnabled(active && Notification.permission === 'granted');
+        }
+      } catch {
+        if (mounted) {
+          setPushEnabled(false);
+        }
+      }
+    };
+
+    checkSubscription();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const enablePush = async () => {
+    setPushBusy(true);
+    try {
+      await subscribeForPushNotifications(props.currentUser.id, props.family.id);
+      setPushEnabled(true);
+      toast.success('Push ativado com sucesso.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Nao foi possivel ativar push.';
+      toast.error(message);
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
+  const disablePush = async () => {
+    setPushBusy(true);
+    try {
+      await unsubscribeFromPushNotifications();
+      setPushEnabled(false);
+      toast.success('Push desativado.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Nao foi possivel desativar push.';
+      toast.error(message);
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
   return (
     <div className="h-full flex flex-col overflow-y-auto custom-scrollbar pb-24">
       <header className="sticky top-0 z-10 bg-background-dark/80 backdrop-blur-md border-b border-white/5 p-4 flex items-center justify-between">
@@ -1868,6 +2113,30 @@ function NotificationsScreen(props: NotificationsScreenProps) {
       </header>
 
       <main className="p-4 space-y-3">
+        <div className="rounded-2xl p-4 bg-white/5 border border-white/10 flex items-center justify-between gap-3">
+          <div>
+            <p className="font-bold text-sm">Push fora do app</p>
+            <p className="text-xs text-slate-400">Receba alertas mesmo com o app fechado.</p>
+          </div>
+          {pushEnabled ? (
+            <button
+              onClick={disablePush}
+              disabled={pushBusy}
+              className="h-9 px-3 rounded-lg bg-white/10 text-slate-100 text-xs font-bold uppercase tracking-wider disabled:opacity-60"
+            >
+              {pushBusy ? '...' : 'Desativar'}
+            </button>
+          ) : (
+            <button
+              onClick={enablePush}
+              disabled={pushBusy}
+              className="h-9 px-3 rounded-lg bg-primary text-white text-xs font-bold uppercase tracking-wider disabled:opacity-60"
+            >
+              {pushBusy ? '...' : 'Ativar Push'}
+            </button>
+          )}
+        </div>
+
         {props.activities.length === 0 && (
           <div className="rounded-2xl p-6 bg-white/5 border border-white/10 text-center text-slate-400">
             Sem notificacoes por enquanto.

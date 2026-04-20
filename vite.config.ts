@@ -12,6 +12,9 @@ export default defineConfig(() => {
       VitePWA({
         registerType: 'autoUpdate',
         includeAssets: ['icon-192.svg', 'icon-512.svg'],
+        workbox: {
+          importScripts: ['push-sw.js'],
+        },
         manifest: {
           id: '/',
           name: 'PetFamily',

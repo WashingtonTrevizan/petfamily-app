@@ -34,6 +34,50 @@ Arquivos principais do fluxo:
 - [src/services/familyApi.ts](src/services/familyApi.ts)
 - [supabase/schema.sql](supabase/schema.sql)
 
+## Push Notifications (app fechado)
+
+O app agora suporta push notifications de navegador/PWA para quando a pessoa nao estiver com o app aberto.
+
+Arquivos principais:
+
+- [src/services/pushNotifications.ts](src/services/pushNotifications.ts)
+- [public/push-sw.js](public/push-sw.js)
+- [supabase/functions/send-web-push/index.ts](supabase/functions/send-web-push/index.ts)
+
+### 1. Variavel no frontend
+
+No `.env.local`:
+
+```env
+VITE_VAPID_PUBLIC_KEY="SUA_CHAVE_VAPID_PUBLICA"
+```
+
+### 2. Rodar migracao SQL
+
+No SQL Editor do Supabase, execute as alteracoes novas de [supabase/schema.sql](supabase/schema.sql) para criar a tabela `push_subscriptions` e as policies.
+
+### 3. Deploy da Edge Function
+
+Instale e autentique o Supabase CLI, depois:
+
+```bash
+supabase functions deploy send-web-push
+```
+
+Configure os secrets da funcao:
+
+```bash
+supabase secrets set VAPID_PUBLIC_KEY="..."
+supabase secrets set VAPID_PRIVATE_KEY="..."
+supabase secrets set VAPID_SUBJECT="mailto:seu-email@dominio.com"
+```
+
+Observacao: `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY` sao providos automaticamente no ambiente de Edge Functions do Supabase.
+
+### 4. Ativar no app
+
+No app, abra a aba de Notificacoes e clique em `Ativar Push` para registrar o dispositivo atual.
+
 ## Rodando localmente
 
 Pre-requisito: Node.js 18+

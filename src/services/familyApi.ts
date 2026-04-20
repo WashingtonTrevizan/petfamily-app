@@ -1,6 +1,7 @@
 import type { User } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import type { Activity, FamilyMember, Pet, Task } from '../types';
+import { triggerFamilyPushNotification } from './pushNotifications';
 
 export interface FamilyInfo {
   id: string;
@@ -95,6 +96,19 @@ function formatRelativeTime(isoDate: string) {
 
   const diffDays = Math.floor(diffHours / 24);
   return `Ha ${diffDays} dia${diffDays > 1 ? 's' : ''}`;
+}
+
+async function notifyFamilyPush(
+  familyId: string,
+  userId: string,
+  title: string,
+  body: string
+) {
+  try {
+    await triggerFamilyPushNotification(familyId, title, body, userId);
+  } catch {
+    // Push e complementar: nao deve quebrar fluxo principal da acao.
+  }
 }
 
 export async function ensureProfile(user: User, fullName?: string) {
@@ -662,6 +676,70 @@ export async function createTask(
   }
 }
 
+export interface RoutineStepInput {
+  title: string;
+  points: number;
+  offsetMinutes: number;
+}
+
+export async function createRoutineFlowTasks(
+  familyId: string,
+  petId: string | null,
+  startAtIso: string,
+  routineName: string,
+  steps: RoutineStepInput[]
+) {
+  const cleanRoutineName = routineName.trim();
+  if (!cleanRoutineName) {
+    throw new Error('Informe o nome da rotina.');
+  }
+
+  if (!steps.length) {
+    throw new Error('Adicione pelo menos um passo na rotina.');
+  }
+
+  const startAt = new Date(startAtIso);
+  if (Number.isNaN(startAt.getTime())) {
+    throw new Error('Data inicial da rotina invalida.');
+  }
+
+  const payload = steps.map((step, index) => {
+    const cleanStepTitle = step.title.trim();
+    if (!cleanStepTitle) {
+      throw new Error(`Passo ${index + 1} sem titulo.`);
+    }
+
+    const safePoints = Number.isFinite(step.points) ? Math.max(0, Math.floor(step.points)) : 0;
+    const safeOffset = Number.isFinite(step.offsetMinutes) ? Math.max(0, Math.floor(step.offsetMinutes)) : index;
+    const scheduledAt = new Date(startAt.getTime() + safeOffset * 60_000).toISOString();
+
+    return {
+      family_id: familyId,
+      pet_id: petId,
+      title: `${cleanRoutineName} - ${cleanStepTitle}`,
+      scheduled_at: scheduledAt,
+      reward_points: safePoints,
+    };
+  });
+
+  const { error } = await supabase.from('tasks').insert(payload);
+
+  if (error && isMissingTaskPointsColumn(error.message)) {
+    const fallbackPayload = payload.map(({ reward_points: _rewardPoints, ...task }) => task);
+    const { error: fallbackError } = await supabase.from('tasks').insert(fallbackPayload);
+
+    if (fallbackError) {
+      throw new Error(fallbackError.message);
+    }
+
+    return;
+  }
+
+  if (error) {
+    throw new Error(error.message);
+  }
+}
+
 export async function completeTask(taskId: string, userId: string, familyId: string, petId?: string) {
   let rewardPoints = 20;
   let resolvedPetId: string | null = petId || null;
@@ -701,6 +779,7 @@ export async function completeTask(taskId: string, userId: string, familyId: str
     .from('tasks')
     .update({
       completed: true,
+      assigned_to: userId,
       completed_by: userId,
       completed_at: new Date().toISOString(),
       pet_id: resolvedPetId,
@@ -742,6 +821,13 @@ export async function completeTask(taskId: string, userId: string, familyId: str
   if (activityError) {
     throw new Error(activityError.message);
   }
+
+  await notifyFamilyPush(
+    familyId,
+    userId,
+    'Tarefa concluida no PetFamily',
+    `Uma tarefa foi concluida e gerou +${rewardPoints} pts.`
+  );
 }
 
 export async function registerActivity(
@@ -783,4 +869,11 @@ export async function registerActivity(
   if (pointsError) {
     throw new Error(pointsError.message);
   }
+
+  await notifyFamilyPush(
+    familyId,
+    userId,
+    'Nova atividade no PetFamily',
+    `Uma atividade foi registrada e gerou +${points} pts.`
+  );
 }
