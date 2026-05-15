@@ -36,7 +36,12 @@
   "fullScopeUrl": "https://petfamily-iota.vercel.app/",
   "minSdkVersion": 21,
   "orientation": "default",
-  "fingerprints": [],
+  "fingerprints": [
+    {
+      "name": "android",
+      "value": "6E:57:5D:DB:8A:5C:8A:69:30:98:01:61:98:89:57:2E:BE:EC:31:84:15:4E:77:7D:B1:BA:84:D9:65:31:63:C1"
+    }
+  ],
   "additionalTrustedOrigins": [],
   "retainedBundles": [],
   "protocolHandlers": [],

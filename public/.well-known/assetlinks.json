@@ -1,0 +1,10 @@
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "app.vercel.petfamily_iota.twa",
+    "sha256_cert_fingerprints": [
+      "6E:57:5D:DB:8A:5C:8A:69:30:98:01:61:98:89:57:2E:BE:EC:31:84:15:4E:77:7D:B1:BA:84:D9:65:31:63:C1"
+    ]
+  }
+}]
